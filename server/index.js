@@ -28,6 +28,8 @@ const server = createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ server, path: '/ws' });
 const code = () => Math.random().toString(36).slice(2, 8).toUpperCase();
+const clean = (value, fallback = '') => String(value || fallback).trim().slice(0, 32);
+
 const roomList = () => [...rooms.entries()].map(([id, room]) => ({
   id,
   name: room.name,
@@ -40,22 +42,34 @@ function send(ws, message) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(message));
 }
 
-function broadcast(room, message) {
-  const payload = JSON.stringify(message);
-  for (const client of room.clients) {
-    if (client.readyState === client.OPEN) client.send(payload);
-  }
+function stateMessage(room, ws) {
+  const player = ws.playerId ? room.state.players[ws.playerId] : null;
+  return {
+    type: 'state',
+    state: room.state,
+    rooms: roomList(),
+    field: FIELD,
+    you: player ? { id: player.id, host: Boolean(player.host), team: player.team, room: room.id } : null
+  };
 }
 
-function stateMessage(room) {
-  return { type: 'state', state: room.state, rooms: roomList(), field: FIELD };
+function broadcast(room) {
+  for (const client of room.clients) send(client, stateMessage(room, client));
 }
 
 function createRoom(name, password) {
   const id = code();
   const state = makeState();
   state.room = id;
-  const room = { id, name: name || `Room ${id}`, password: password || '', state, clients: new Set(), interval: null };
+  const room = {
+    id,
+    name: clean(name, `Room ${id}`),
+    password: clean(password),
+    state,
+    clients: new Set(),
+    clientKeys: new Map(),
+    interval: null
+  };
   rooms.set(id, room);
   return room;
 }
@@ -64,14 +78,29 @@ function startLoop(room) {
   if (room.interval) return;
   room.interval = setInterval(() => {
     step(room.state);
-    broadcast(room, stateMessage(room));
+    broadcast(room);
   }, 1000 / 30);
 }
 
 function closeEmptyRoom(room) {
-  if (room.clients.size > 0) return;
+  if (!room || room.clients.size > 0) return;
   clearInterval(room.interval);
   rooms.delete(room.id);
+}
+
+function leaveRoom(ws) {
+  const room = ws.room;
+  if (!room || !ws.playerId) return;
+  delete room.state.players[ws.playerId];
+  room.clients.delete(ws);
+  if (ws.clientKey) room.clientKeys.delete(ws.clientKey);
+  const hadHost = !Object.values(room.state.players).some((p) => p.host);
+  const nextPlayer = Object.values(room.state.players)[0];
+  if (hadHost && nextPlayer) nextPlayer.host = true;
+  ws.room = null;
+  ws.playerId = null;
+  broadcast(room);
+  closeEmptyRoom(room);
 }
 
 function assignTeam(player, team, room) {
@@ -80,13 +109,36 @@ function assignTeam(player, team, room) {
   if (safeTeam === 'red' && count >= 11) return false;
   if (safeTeam === 'blue' && count >= 11) return false;
   player.team = safeTeam;
-  Object.assign(player, spawn(safeTeam, count));
+  if (safeTeam !== 'spectators') Object.assign(player, spawn(safeTeam, count));
   return true;
 }
 
+function joinRoom(ws, room, message, host = false) {
+  const clientKey = clean(message.clientKey, `${Date.now()}-${Math.random()}`);
+  const existing = room.clientKeys.get(clientKey);
+  if (existing && existing !== ws) {
+    send(existing, { type: 'error', message: 'You joined this room again from the same browser, so the older connection was removed.' });
+    existing.close(4000, 'duplicate client');
+  }
+
+  if (Object.keys(room.state.players).length >= FIELD.maxPlayers) return send(ws, { type: 'error', message: 'Room is full' });
+
+  const player = makePlayer(`${Date.now()}-${Math.random()}`, clean(message.playerName, 'Player'), 'spectators', host);
+  assignTeam(player, message.team || 'spectators', room);
+  room.state.players[player.id] = player;
+  room.clients.add(ws);
+  room.clientKeys.set(clientKey, ws);
+  ws.room = room;
+  ws.playerId = player.id;
+  ws.clientKey = clientKey;
+  startLoop(room);
+  broadcast(room);
+}
+
 wss.on('connection', (ws) => {
-  let room = null;
-  let me = null;
+  ws.room = null;
+  ws.playerId = null;
+  ws.clientKey = null;
   send(ws, { type: 'rooms', rooms: roomList() });
 
   ws.on('message', (raw) => {
@@ -96,42 +148,44 @@ wss.on('connection', (ws) => {
     if (message.type === 'list') return send(ws, { type: 'rooms', rooms: roomList() });
 
     if (message.type === 'create') {
-      room = createRoom(message.name, message.password);
-      me = makePlayer(`${Date.now()}-${Math.random()}`, String(message.playerName || 'Player'), 'spectators', true);
-      assignTeam(me, message.team || 'spectators', room);
-      room.state.players[me.id] = me;
-      room.clients.add(ws);
-      startLoop(room);
-      broadcast(room, stateMessage(room));
+      leaveRoom(ws);
+      const room = createRoom(message.name, message.password);
+      joinRoom(ws, room, message, true);
       return;
     }
 
     if (message.type === 'join') {
-      room = rooms.get(String(message.room || '').toUpperCase());
+      const room = rooms.get(String(message.room || '').toUpperCase());
       if (!room) return send(ws, { type: 'error', message: 'Room not found' });
-      if (room.password && room.password !== message.password) return send(ws, { type: 'error', message: 'Wrong password' });
-      if (Object.keys(room.state.players).length >= FIELD.maxPlayers) return send(ws, { type: 'error', message: 'Room is full' });
-      me = makePlayer(`${Date.now()}-${Math.random()}`, String(message.playerName || 'Player'), 'spectators', false);
-      assignTeam(me, message.team || 'spectators', room);
-      room.state.players[me.id] = me;
-      room.clients.add(ws);
-      startLoop(room);
-      broadcast(room, stateMessage(room));
+      if (room.password && room.password !== clean(message.password)) return send(ws, { type: 'error', message: 'Wrong password' });
+      leaveRoom(ws);
+      joinRoom(ws, room, message, false);
       return;
     }
 
+    const room = ws.room;
+    const me = room && ws.playerId ? room.state.players[ws.playerId] : null;
     if (!room || !me) return;
 
     if (message.type === 'input') {
-      Object.assign(me, { up: Boolean(message.up), down: Boolean(message.down), left: Boolean(message.left), right: Boolean(message.right), kick: Boolean(message.kick) });
+      Object.assign(me, {
+        up: Boolean(message.up),
+        down: Boolean(message.down),
+        left: Boolean(message.left),
+        right: Boolean(message.right),
+        kick: Boolean(message.kick)
+      });
+      return;
     }
 
     if (message.type === 'team') {
       if (!assignTeam(me, message.team, room)) return send(ws, { type: 'error', message: 'That team is full' });
-      broadcast(room, stateMessage(room));
+      broadcast(room);
+      return;
     }
 
-    if (message.type === 'control' && me.host) {
+    if (message.type === 'control') {
+      if (!me.host) return send(ws, { type: 'error', message: 'Only the room host can use those controls.' });
       if (message.action === 'start') room.state.running = true;
       if (message.action === 'pause') room.state.running = false;
       if (message.action === 'reset') {
@@ -140,17 +194,11 @@ wss.on('connection', (ws) => {
         room.state.time = 0;
         resetPositions(room.state);
       }
-      broadcast(room, stateMessage(room));
+      broadcast(room);
     }
   });
 
-  ws.on('close', () => {
-    if (!room || !me) return;
-    delete room.state.players[me.id];
-    room.clients.delete(ws);
-    broadcast(room, stateMessage(room));
-    closeEmptyRoom(room);
-  });
+  ws.on('close', () => leaveRoom(ws));
 });
 
 server.listen(port, '0.0.0.0', () => console.log(`Pro Ball server running on http://localhost:${port}`));
