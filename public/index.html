@@ -5,13 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Pro Ball</title>
   <style>
-    *{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:#101923;color:white}header{padding:14px 18px;background:#07111d;display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}.brand{font-size:22px;font-weight:800}.pill{background:#1c2c3f;border:1px solid #35516f;border-radius:999px;padding:8px 12px}main{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px}.panel{background:#132238;border:1px solid #2b4563;border-radius:16px;padding:14px;box-shadow:0 10px 30px #0005}input,button{width:100%;padding:11px;margin:6px 0;border-radius:10px;border:1px solid #36526e;background:#0d1827;color:white}button{cursor:pointer;font-weight:700;background:#1e88e5;border:0}button.secondary{background:#2a3c52}.teams{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:12px}.team{min-height:130px;border-radius:14px;padding:10px;background:#0d1827;border:1px solid #2a3e54}.red{border-color:#ff5b5b}.blue{border-color:#5ba4ff}.score{font-size:28px;font-weight:900;text-align:center}.hint{font-size:13px;color:#b8c7d9}canvas{width:100%;max-width:980px;background:#17753d;border-radius:16px;border:3px solid #e9f7ef;display:block;margin:auto}.row{display:flex;gap:8px}.row>*{flex:1}.room{padding:8px;border-radius:10px;background:#0a1524;margin:6px 0;cursor:pointer}.error{color:#ffb3b3}.ok{color:#b9ffd0}@media(max-width:850px){main{grid-template-columns:1fr}.teams{grid-template-columns:1fr}}
+    *{box-sizing:border-box}body{margin:0;font-family:Inter,Arial,sans-serif;background:#101923;color:white}header{padding:14px 18px;background:#07111d;display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap}.brand{font-size:22px;font-weight:800}.pill{background:#1c2c3f;border:1px solid #35516f;border-radius:999px;padding:8px 12px}.current{background:#12311f;border-color:#46d37d;color:#b9ffd0}main{display:grid;grid-template-columns:320px 1fr;gap:16px;padding:16px}.panel{background:#132238;border:1px solid #2b4563;border-radius:16px;padding:14px;box-shadow:0 10px 30px #0005}input,button{width:100%;padding:11px;margin:6px 0;border-radius:10px;border:1px solid #36526e;background:#0d1827;color:white}button{cursor:pointer;font-weight:700;background:#1e88e5;border:0}button.secondary{background:#2a3c52}.teams{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:12px}.team{min-height:130px;border-radius:14px;padding:10px;background:#0d1827;border:1px solid #2a3e54}.red{border-color:#ff5b5b}.blue{border-color:#5ba4ff}.score{font-size:28px;font-weight:900;text-align:center}.hint{font-size:13px;color:#b8c7d9}canvas{width:100%;max-width:980px;background:#17753d;border-radius:16px;border:3px solid #e9f7ef;display:block;margin:auto}.row{display:flex;gap:8px}.row>*{flex:1}.room{padding:8px;border-radius:10px;background:#0a1524;margin:6px 0;cursor:pointer;border:1px solid transparent}.room.active{border-color:#46d37d;background:#10291d}.error{color:#ffb3b3}.ok{color:#b9ffd0}.share{overflow-wrap:anywhere;line-height:1.3}@media(max-width:850px){main{grid-template-columns:1fr}.teams{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
 <header>
   <div class="brand">⚽ Pro Ball</div>
   <div class="pill" id="status">Connecting...</div>
+  <div class="pill current" id="currentRoom">No room joined</div>
   <div class="pill">Max 22 players • 11v11</div>
 </header>
 <main>
@@ -23,7 +24,7 @@
     <div class="row"><button id="create">Create room</button><button class="secondary" id="refresh">Refresh</button></div>
     <input id="roomCode" placeholder="Room code or shared link" />
     <button id="join">Join room</button>
-    <p id="msg" class="hint">Create a room, share the generated link, or join from available rooms.</p>
+    <p id="msg" class="hint share">Create a room, share the generated link, or join from available rooms.</p>
     <h3>Available rooms</h3><div id="rooms"></div>
     <h3>Controls</h3>
     <p class="hint">Move: W A S D / Arrow keys. Kick: Space. Host can start, pause and reset.</p>
@@ -46,10 +47,12 @@
 <script>
 const wsUrl = location.protocol === 'https:' ? 'wss://' + location.host + '/ws' : 'ws://' + location.host + '/ws';
 let ws, state, field = { w:980, h:560, goalH:150, playerR:15, ballR:9, maxPlayers:22 }, keys = {}, myTeam = 'spectators';
+let lastRoomsKey = '', lastPlayersKey = '', lastRoomCode = '', lastScoreKey = '', drawPending = false;
 const $ = (id) => document.getElementById(id);
 const canvas = $('c');
 const ctx = canvas.getContext('2d');
-function log(text, cls='hint') { $('msg').className = cls; $('msg').textContent = text; }
+function setText(id, text) { const el = $(id); if (el.textContent !== String(text)) el.textContent = text; }
+function log(text, cls='hint') { const msg = $('msg'); if (msg.textContent !== text) msg.textContent = text; msg.className = cls + ' share'; }
 function send(message) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(message)); }
 function connect() {
   ws = new WebSocket(wsUrl);
@@ -57,19 +60,32 @@ function connect() {
   ws.onmessage = (event) => {
     const message = JSON.parse(event.data);
     if (message.type === 'state') {
-      state = message.state; field = message.field; render(); renderRooms(message.rooms);
-      history.replaceState(null, '', '?room=' + state.room);
-      log('Share this link with your players: ' + location.href, 'ok');
+      state = message.state; field = message.field;
+      updateCurrentRoom();
+      scheduleRender();
+      renderRoomsIfChanged(message.rooms);
     }
-    if (message.type === 'rooms') renderRooms(message.rooms);
+    if (message.type === 'rooms') renderRoomsIfChanged(message.rooms);
     if (message.type === 'error') log(message.message, 'error');
   };
   ws.onclose = () => { $('status').textContent = 'Disconnected - retrying'; setTimeout(connect, 2000); };
 }
-function renderRooms(list) {
-  $('rooms').innerHTML = (list || []).map((room) => `<div class="room" onclick="pick('${room.id}')"><b>${room.name}</b><br><span class="hint">${room.id} • ${room.players}/22 ${room.locked ? '🔒' : ''}</span></div>`).join('') || '<p class="hint">No rooms yet</p>';
+function updateCurrentRoom() {
+  if (!state || !state.room || state.room === lastRoomCode) return;
+  lastRoomCode = state.room;
+  setText('currentRoom', 'Current room: ' + state.room);
+  const shareLink = location.origin + location.pathname + '?room=' + state.room;
+  history.replaceState(null, '', '?room=' + state.room);
+  log('Share this link with your players: ' + shareLink, 'ok');
 }
-window.pick = (id) => $('roomCode').value = id;
+function renderRoomsIfChanged(list) {
+  const rooms = list || [];
+  const key = JSON.stringify(rooms.map(r => [r.id, r.name, r.players, r.locked, r.running, r.id === lastRoomCode]));
+  if (key === lastRoomsKey) return;
+  lastRoomsKey = key;
+  $('rooms').innerHTML = rooms.map((room) => `<button type="button" class="room ${room.id === lastRoomCode ? 'active' : ''}" data-room="${room.id}"><b>${room.name}</b><br><span class="hint">${room.id} • ${room.players}/22 ${room.locked ? '🔒' : ''}${room.id === lastRoomCode ? ' • current' : ''}</span></button>`).join('') || '<p class="hint">No rooms yet</p>';
+  for (const button of document.querySelectorAll('.room[data-room]')) button.addEventListener('click', () => $('roomCode').value = button.dataset.room);
+}
 function playerName() { return $('name').value || 'Player ' + Math.floor(Math.random() * 99); }
 $('create').onclick = () => send({ type:'create', name:$('roomName').value, playerName:playerName(), password:$('password').value, team:myTeam });
 $('join').onclick = () => { const raw = $('roomCode').value.trim(); const room = (raw.match(/room=([A-Z0-9]+)/) || [])[1] || raw.toUpperCase(); send({ type:'join', room, playerName:playerName(), password:$('password').value, team:myTeam }); };
@@ -84,6 +100,7 @@ addEventListener('keydown', (event) => { keys[event.key.toLowerCase()] = true; i
 addEventListener('keyup', (event) => keys[event.key.toLowerCase()] = false);
 setInterval(() => send({ type:'input', up:keys.w||keys.arrowup, down:keys.s||keys.arrowdown, left:keys.a||keys.arrowleft, right:keys.d||keys.arrowright, kick:keys[' ']||keys.space }), 33);
 function mm(seconds) { const m = Math.floor(seconds / 60), s = Math.floor(seconds % 60); return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0'); }
+function scheduleRender() { if (drawPending) return; drawPending = true; requestAnimationFrame(() => { drawPending = false; render(); }); }
 function render() {
   if (!state) return;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -99,11 +116,19 @@ function render() {
     ctx.fillStyle = 'white'; ctx.font = '11px Arial'; ctx.textAlign = 'center'; ctx.fillText(p.name.slice(0,9), p.x, p.y - 20);
   }
   ctx.beginPath(); ctx.fillStyle='white'; ctx.arc(state.ball.x,state.ball.y,9,0,Math.PI*2); ctx.fill();
-  $('redScore').textContent = state.red; $('blueScore').textContent = state.blue; $('timer').textContent = mm(state.time);
-  const players = Object.values(state.players);
-  $('redList').innerHTML = players.filter(p=>p.team==='red').map(p=>'🔴 '+p.name).join('<br>') || '<span class="hint">Empty</span>';
-  $('blueList').innerHTML = players.filter(p=>p.team==='blue').map(p=>'🔵 '+p.name).join('<br>') || '<span class="hint">Empty</span>';
-  $('specList').innerHTML = players.filter(p=>p.team==='spectators').map(p=>'👀 '+p.name).join('<br>') || '<span class="hint">Empty</span>';
+  const scoreKey = state.red + ':' + state.blue + ':' + Math.floor(state.time);
+  if (scoreKey !== lastScoreKey) { lastScoreKey = scoreKey; setText('redScore', state.red); setText('blueScore', state.blue); setText('timer', mm(state.time)); }
+  renderTeamListsIfChanged();
+}
+function renderTeamListsIfChanged() {
+  const players = Object.values(state.players).map(p => [p.id, p.name, p.team]).sort((a,b) => a[0].localeCompare(b[0]));
+  const key = JSON.stringify(players);
+  if (key === lastPlayersKey) return;
+  lastPlayersKey = key;
+  const all = Object.values(state.players);
+  $('redList').innerHTML = all.filter(p=>p.team==='red').map(p=>'🔴 '+p.name).join('<br>') || '<span class="hint">Empty</span>';
+  $('blueList').innerHTML = all.filter(p=>p.team==='blue').map(p=>'🔵 '+p.name).join('<br>') || '<span class="hint">Empty</span>';
+  $('specList').innerHTML = all.filter(p=>p.team==='spectators').map(p=>'👀 '+p.name).join('<br>') || '<span class="hint">Empty</span>';
 }
 connect();
 const query = new URLSearchParams(location.search); if (query.get('room')) $('roomCode').value = query.get('room');
