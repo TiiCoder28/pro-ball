@@ -5,34 +5,11 @@ export function clamp(value, min, max) {
 }
 
 export function makePlayer(id, name, team = 'spectators', host = false) {
-  return {
-    id,
-    name,
-    team,
-    host,
-    x: FIELD.w / 2,
-    y: FIELD.h / 2,
-    vx: 0,
-    vy: 0,
-    up: false,
-    down: false,
-    left: false,
-    right: false,
-    kick: false
-  };
+  return { id, name, team, host, x: FIELD.w / 2, y: FIELD.h / 2, vx: 0, vy: 0, up: false, down: false, left: false, right: false, kick: false };
 }
 
 export function makeState() {
-  return {
-    room: '',
-    running: false,
-    time: 0,
-    limit: 300,
-    red: 0,
-    blue: 0,
-    players: {},
-    ball: { x: FIELD.w / 2, y: FIELD.h / 2, vx: 0, vy: 0 }
-  };
+  return { room: '', running: false, time: 0, limit: 300, red: 0, blue: 0, players: {}, ball: { x: FIELD.w / 2, y: FIELD.h / 2, vx: 0, vy: 0 }, lastTouchTeam: null, restartTeam: null };
 }
 
 export function spawn(team, index = 0) {
@@ -48,6 +25,40 @@ function limitSpeed(body, max) {
     body.vx = (body.vx / speed) * max;
     body.vy = (body.vy / speed) * max;
   }
+}
+
+function opposite(team) {
+  if (team === 'red') return 'blue';
+  if (team === 'blue') return 'red';
+  return 'red';
+}
+
+function activePlayers(state, team) {
+  return Object.values(state.players).filter((player) => player.team === team);
+}
+
+function givePossession(state, team, x, y) {
+  const ball = state.ball;
+  ball.x = clamp(x, FIELD.ballR + 28, FIELD.w - FIELD.ballR - 28);
+  ball.y = clamp(y, FIELD.ballR + 28, FIELD.h - FIELD.ballR - 28);
+  ball.vx = 0;
+  ball.vy = 0;
+  state.restartTeam = team;
+  state.lastTouchTeam = null;
+
+  const players = activePlayers(state, team);
+  if (!players.length) return;
+  const player = players.reduce((best, candidate) => {
+    const bestDistance = Math.hypot(best.x - ball.x, best.y - ball.y);
+    const candidateDistance = Math.hypot(candidate.x - ball.x, candidate.y - ball.y);
+    return candidateDistance < bestDistance ? candidate : best;
+  }, players[0]);
+
+  const offset = team === 'red' ? -34 : 34;
+  player.x = clamp(ball.x + offset, FIELD.playerR + 8, FIELD.w - FIELD.playerR - 8);
+  player.y = clamp(ball.y, FIELD.playerR + 8, FIELD.h - FIELD.playerR - 8);
+  player.vx = 0;
+  player.vy = 0;
 }
 
 function collidePlayers(players) {
@@ -76,7 +87,8 @@ function collidePlayers(players) {
   }
 }
 
-function collideBallPlayer(ball, player) {
+function collideBallPlayer(state, player) {
+  const ball = state.ball;
   const dx = ball.x - player.x;
   const dy = ball.y - player.y;
   const dist = Math.hypot(dx, dy) || 1;
@@ -92,6 +104,8 @@ function collideBallPlayer(ball, player) {
   player.vx -= nx * 0.08;
   player.vy -= ny * 0.08;
   player.kick = false;
+  state.lastTouchTeam = player.team;
+  state.restartTeam = null;
 }
 
 export function step(state, dt = 1 / 60) {
@@ -106,7 +120,6 @@ export function step(state, dt = 1 / 60) {
     const magnitude = Math.hypot(ax, ay) || 1;
     ax /= magnitude;
     ay /= magnitude;
-
     player.vx = (player.vx + ax * 0.52) * 0.88;
     player.vy = (player.vy + ay * 0.52) * 0.88;
     limitSpeed(player, 4.2);
@@ -115,7 +128,7 @@ export function step(state, dt = 1 / 60) {
   }
 
   collidePlayers(players);
-  for (const player of players) collideBallPlayer(state.ball, player);
+  for (const player of players) collideBallPlayer(state, player);
 
   const ball = state.ball;
   limitSpeed(ball, 11.5);
@@ -123,34 +136,41 @@ export function step(state, dt = 1 / 60) {
   ball.y += ball.vy;
   ball.vx *= 0.982;
   ball.vy *= 0.982;
-
   if (Math.abs(ball.vx) < 0.012) ball.vx = 0;
   if (Math.abs(ball.vy) < 0.012) ball.vy = 0;
 
-  if (ball.y < FIELD.ballR || ball.y > FIELD.h - FIELD.ballR) {
-    ball.y = clamp(ball.y, FIELD.ballR, FIELD.h - FIELD.ballR);
-    ball.vy *= -0.82;
+  const touchTeam = state.lastTouchTeam;
+  const awardedTeam = opposite(touchTeam);
+
+  if (ball.y < -FIELD.ballR) {
+    givePossession(state, awardedTeam, ball.x, FIELD.ballR + 36);
+    return state;
+  }
+
+  if (ball.y > FIELD.h + FIELD.ballR) {
+    givePossession(state, awardedTeam, ball.x, FIELD.h - FIELD.ballR - 36);
+    return state;
   }
 
   const inGoal = ball.y > FIELD.h / 2 - FIELD.goalH / 2 && ball.y < FIELD.h / 2 + FIELD.goalH / 2;
-  if (ball.x < FIELD.ballR) {
+  if (ball.x < -FIELD.ballR) {
     if (inGoal) {
       state.blue += 1;
       resetPositions(state);
     } else {
-      ball.x = FIELD.ballR;
-      ball.vx *= -0.82;
+      givePossession(state, awardedTeam, FIELD.ballR + 36, ball.y);
     }
+    return state;
   }
 
-  if (ball.x > FIELD.w - FIELD.ballR) {
+  if (ball.x > FIELD.w + FIELD.ballR) {
     if (inGoal) {
       state.red += 1;
       resetPositions(state);
     } else {
-      ball.x = FIELD.w - FIELD.ballR;
-      ball.vx *= -0.82;
+      givePossession(state, awardedTeam, FIELD.w - FIELD.ballR - 36, ball.y);
     }
+    return state;
   }
 
   return state;
@@ -158,6 +178,8 @@ export function step(state, dt = 1 / 60) {
 
 export function resetPositions(state) {
   state.ball = { x: FIELD.w / 2, y: FIELD.h / 2, vx: 0, vy: 0 };
+  state.lastTouchTeam = null;
+  state.restartTeam = null;
   let redIndex = 0;
   let blueIndex = 0;
   for (const player of Object.values(state.players)) {
