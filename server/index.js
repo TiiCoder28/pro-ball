@@ -10,6 +10,15 @@ const publicDir = path.join(__dirname, '../public');
 const port = process.env.PORT || 3000;
 const rooms = new Map();
 
+const contentTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml'
+};
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -17,7 +26,8 @@ const server = createServer(async (req, res) => {
     const safePath = path.normalize(requested).replace(/^\.\.(\/|\\|$)/, '');
     const filePath = path.join(publicDir, safePath);
     const data = await readFile(filePath);
-    res.writeHead(200, { 'Content-Type': filePath.endsWith('.html') ? 'text/html; charset=utf-8' : 'text/plain; charset=utf-8' });
+    const type = contentTypes[path.extname(filePath)] || 'text/plain; charset=utf-8';
+    res.writeHead(200, { 'Content-Type': type });
     res.end(data);
   } catch {
     const data = await readFile(path.join(publicDir, 'index.html'));
@@ -94,9 +104,9 @@ function leaveRoom(ws) {
   delete room.state.players[ws.playerId];
   room.clients.delete(ws);
   if (ws.clientKey) room.clientKeys.delete(ws.clientKey);
-  const hadHost = !Object.values(room.state.players).some((p) => p.host);
+  const hasHost = Object.values(room.state.players).some((p) => p.host);
   const nextPlayer = Object.values(room.state.players)[0];
-  if (hadHost && nextPlayer) nextPlayer.host = true;
+  if (!hasHost && nextPlayer) nextPlayer.host = true;
   ws.room = null;
   ws.playerId = null;
   broadcast(room);
