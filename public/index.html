@@ -27,6 +27,15 @@
           <input id="roomName" placeholder="Room name">
           <input id="password" placeholder="Password optional">
           <input id="roomCode" placeholder="Room code or shared link">
+          <label class="fieldLabel">Match length
+            <select id="duration">
+              <option value="60">1 minute</option>
+              <option value="120">2 minutes</option>
+              <option value="180">3 minutes</option>
+              <option value="300" selected>5 minutes</option>
+              <option value="600">10 minutes</option>
+            </select>
+          </label>
         </div>
         <div class="row" style="margin-top:12px">
           <button id="create" type="button">Create Room</button>
@@ -49,8 +58,20 @@
       <aside class="panel">
         <button id="backLobby" type="button" class="secondary">← Lobby</button>
         <h2>Controls</h2>
-        <p class="hint" id="hostHelp">Only the room creator can start, pause and reset. Join Red or Blue to move.</p>
-        <div class="row"><button id="start" type="button">Start</button><button id="pause" type="button" class="secondary">Pause</button><button id="reset" type="button" class="secondary">Reset</button></div>
+        <p class="hint" id="hostHelp">Only the room creator can start, pause, stop and reset. Join Red or Blue to move.</p>
+        <div id="hostControls" class="hostControls">
+          <label class="fieldLabel">Match length
+            <select id="gameDuration">
+              <option value="60">1 minute</option>
+              <option value="120">2 minutes</option>
+              <option value="180">3 minutes</option>
+              <option value="300" selected>5 minutes</option>
+              <option value="600">10 minutes</option>
+            </select>
+          </label>
+          <div class="row"><button id="start" type="button">Start</button><button id="pause" type="button" class="secondary">Pause</button></div>
+          <div class="row"><button id="stop" type="button" class="secondary">Stop & Save</button><button id="reset" type="button" class="secondary">Reset</button></div>
+        </div>
         <h3>Teams</h3>
         <div class="row"><button id="redBtn" type="button">Join Red</button><button id="blueBtn" type="button">Join Blue</button><button id="specBtn" type="button" class="secondary">Spectate</button></div>
         <div class="teams">
@@ -63,7 +84,7 @@
       <section>
         <div class="scoreboard">
           <div class="scoreTeam"><span>🔴 Red</span><span class="scoreNumber" id="redScore">0</span></div>
-          <div class="timerBox"><div class="timer" id="timer">00:00</div><div class="statusLine" id="matchStatus">WAITING</div></div>
+          <div class="timerBox"><div class="timer" id="timer">05:00</div><div class="statusLine" id="matchStatus">WAITING</div></div>
           <div class="scoreTeam blueTeam"><span class="scoreNumber" id="blueScore">0</span><span>Blue 🔵</span></div>
         </div>
         <canvas id="field" width="980" height="560"></canvas>
