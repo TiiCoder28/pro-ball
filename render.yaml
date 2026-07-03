@@ -3,6 +3,6 @@ services:
     name: pro-ball
     env: node
     plan: free
-    buildCommand: npm install && npm install postgres
+    buildCommand: npm install
     startCommand: npm start
     autoDeploy: true
