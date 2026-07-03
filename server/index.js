@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { FIELD, makePlayer, makeState, spawn, step, resetPositions } from './physics.js';
+import { initDb, saveRoom, updateRoomPlayers, closeRoomRecord, startMatchRecord, finishMatchRecord } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(__dirname, '../public');
@@ -39,13 +40,16 @@ const server = createServer(async (req, res) => {
 const wss = new WebSocketServer({ server, path: '/ws' });
 const code = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 const clean = (value, fallback = '') => String(value || fallback).trim().slice(0, 32);
+const durationSeconds = (value) => Math.max(60, Math.min(600, Number(value || 300)));
 
 const roomList = () => [...rooms.entries()].map(([id, room]) => ({
   id,
   name: room.name,
   players: Object.keys(room.state.players).length,
   locked: Boolean(room.password),
-  running: room.state.running
+  running: room.state.running,
+  status: room.status,
+  limit: room.state.limit
 }));
 
 function send(ws, message) {
@@ -67,27 +71,44 @@ function broadcast(room) {
   for (const client of room.clients) send(client, stateMessage(room, client));
 }
 
-function createRoom(name, password) {
+function createRoom(name, password, duration, hostKey) {
   const id = code();
   const state = makeState();
   state.room = id;
+  state.limit = durationSeconds(duration);
+  state.status = 'waiting';
   const room = {
     id,
     name: clean(name, `Room ${id}`),
     password: clean(password),
+    hostKey: clean(hostKey),
+    status: 'waiting',
     state,
     clients: new Set(),
     clientKeys: new Map(),
-    interval: null
+    interval: null,
+    matchId: null,
+    savedFinal: false
   };
   rooms.set(id, room);
+  saveRoom(room, room.hostKey);
   return room;
 }
 
 function startLoop(room) {
   if (room.interval) return;
   room.interval = setInterval(() => {
+    const wasRunning = room.state.running;
     step(room.state);
+    if (wasRunning && room.state.limit && room.state.time >= room.state.limit) {
+      room.state.running = false;
+      room.state.status = 'finished';
+      room.status = 'finished';
+      if (!room.savedFinal) {
+        room.savedFinal = true;
+        finishMatchRecord(room, 'finished');
+      }
+    }
     broadcast(room);
   }, 1000 / 30);
 }
@@ -95,6 +116,7 @@ function startLoop(room) {
 function closeEmptyRoom(room) {
   if (!room || room.clients.size > 0) return;
   clearInterval(room.interval);
+  closeRoomRecord(room);
   rooms.delete(room.id);
 }
 
@@ -109,6 +131,7 @@ function leaveRoom(ws) {
   if (!hasHost && nextPlayer) nextPlayer.host = true;
   ws.room = null;
   ws.playerId = null;
+  updateRoomPlayers(room);
   broadcast(room);
   closeEmptyRoom(room);
 }
@@ -142,7 +165,33 @@ function joinRoom(ws, room, message, host = false) {
   ws.playerId = player.id;
   ws.clientKey = clientKey;
   startLoop(room);
+  updateRoomPlayers(room);
   broadcast(room);
+}
+
+async function startMatch(room, duration) {
+  if (room.state.status === 'stopped' || room.state.status === 'finished') {
+    room.state.red = 0;
+    room.state.blue = 0;
+    room.state.time = 0;
+    resetPositions(room.state);
+  }
+  room.state.limit = durationSeconds(duration || room.state.limit);
+  room.state.running = true;
+  room.state.status = 'running';
+  room.status = 'running';
+  room.savedFinal = false;
+  room.matchId = await startMatchRecord(room);
+}
+
+async function stopMatch(room) {
+  room.state.running = false;
+  room.state.status = 'stopped';
+  room.status = 'stopped';
+  if (!room.savedFinal) {
+    room.savedFinal = true;
+    await finishMatchRecord(room, 'stopped');
+  }
 }
 
 wss.on('connection', (ws) => {
@@ -151,7 +200,7 @@ wss.on('connection', (ws) => {
   ws.clientKey = null;
   send(ws, { type: 'rooms', rooms: roomList() });
 
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     let message;
     try { message = JSON.parse(raw); } catch { return; }
 
@@ -159,7 +208,7 @@ wss.on('connection', (ws) => {
 
     if (message.type === 'create') {
       leaveRoom(ws);
-      const room = createRoom(message.name, message.password);
+      const room = createRoom(message.name, message.password, message.duration, message.clientKey);
       joinRoom(ws, room, message, true);
       return;
     }
@@ -196,12 +245,21 @@ wss.on('connection', (ws) => {
 
     if (message.type === 'control') {
       if (!me.host) return send(ws, { type: 'error', message: 'Only the room host can use those controls.' });
-      if (message.action === 'start') room.state.running = true;
-      if (message.action === 'pause') room.state.running = false;
+      if (message.action === 'start') await startMatch(room, message.duration);
+      if (message.action === 'pause') {
+        room.state.running = false;
+        room.state.status = 'paused';
+        room.status = 'paused';
+      }
+      if (message.action === 'stop') await stopMatch(room);
       if (message.action === 'reset') {
         room.state.red = 0;
         room.state.blue = 0;
         room.state.time = 0;
+        room.state.running = false;
+        room.state.status = 'waiting';
+        room.status = 'waiting';
+        room.savedFinal = false;
         resetPositions(room.state);
       }
       broadcast(room);
@@ -211,4 +269,5 @@ wss.on('connection', (ws) => {
   ws.on('close', () => leaveRoom(ws));
 });
 
+await initDb();
 server.listen(port, '0.0.0.0', () => console.log(`Pro Ball server running on http://localhost:${port}`));
